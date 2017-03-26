@@ -79,20 +79,185 @@ type=2时Message Header占用3个字节，相对于type＝1格式又省去了表
 上面我们提到在chunk中会有时间戳timestamp和时间戳差timestamp delta，并且它们不会同时存在，只有这两者之一大于3个字节能表示的最大数值0xFFFFFF＝16777215时，才会用这个字段来表示真正的时间戳，否则这个字段为0。扩展时间戳占4个字节，能表示的最大数值就是0xFFFFFFFF＝4294967295。当扩展时间戳启用时，timestamp字段或者timestamp delta要全置为1，表示应该去扩展时间戳字段来提取真正的时间戳或者时间戳差。注意扩展时间戳存储的是完整值，而不是减去时间戳或者时间戳差的值。
 ###### 3.3.4 Chunk Data（块数据）：
 用户层面上真正想要发送的与协议无关的数据，长度在(0,chunkSize]之间。
-##### chunk表示例1
+##### 3.3.5 chunk表示例1
 ![Alta Text](https://github.com/jackytianhappy/ImgSource/blob/master/sample-chunk1.png?raw=true)
+首先包含第一个Message的chunk的Chunk Type为0，因为它没有前面可参考的chunk，timestamp为1000，表示时间戳。type为0的header占用11个字节，假定chunkstreamId为3<127，因此Basic Header占用1个字节，再加上Data的32个字节，因此第一个chunk共44＝11+1+32个字节。<br>
+第二个chunk和第一个chunk的CSID，TypeId，Data的长度都相同，因此采用Chunk Type＝2，timestamp delta＝1020-1000＝20，因此第二个chunk占用36=3+1+32个字节。<br>
+第三个chunk和第二个chunk的CSID，TypeId，Data的长度和时间戳差都相同，因此采用Chunk Type＝3省去全部Message Header的信息，占用33=1+32个字节。<br>
+第四个chunk和第三个chunk情况相同，也占用33=1+32个字节。<br>
+最后实际发送的chunk如下：<br>
+![Alta Text](https://github.com/jackytianhappy/ImgSource/blob/master/sample-chunk1-result.png?raw=true)
 
+##### 3.3.6 chunk表示例2
+![Alta Text](https://github.com/jackytianhappy/ImgSource/blob/master/sample-chunk2.png?raw=true)
+注意到Data的Length＝307>128,因此这个Message要切分成几个chunk发送，第一个chunk的Type＝0，Timestamp＝1000，承担128个字节的Data，因此共占用140=11+1+128个字节<br>
+第二个chunk也要发送128个字节，其他字段也同第一个chunk，因此采用Chunk Type＝3，此时时间戳也为1000，共占用129=1+128个字节。<br>
+第三个chunk要发送的Data的长度为307-128-128=51个字节，还是采用Type＝3，共占用1+51＝52个字节。<br>
+最后实际发送的chunk如下：<br>
+![Alta Text](https://github.com/jackytianhappy/ImgSource/blob/master/sample-chunk2-result.png?raw=true)
 
+#### 3.4 协议控制消息（Protocol Control Message）
+在RTMP的chunk流会用一些特殊的值来代表协议的控制消息，<font color = 'red'>它们的Message Stream ID必须为0（代表控制流信息）</font>,CSID必须为2，Message Type ID可以为1，2，3，5，6，具体代表的消息会在下面依次说明。控制消息的接受端会忽略掉chunk中的时间戳，收到后立即生效。<br>
+- <font color= 'red'><B>Set Chunk Size(Message Type ID=1):</B></font> 设置chunk中Data字段所能承载的最大字节数，默认为128B，通信过程中可以通过发送该消息来设置chunk Size的大小（不得小于128B），而且通信双方会各自维护一个chunkSize，两端的chunkSize是独立的。比如当A想向B发送一个200B的Message，但默认的chunkSize是128B，因此就要将该消息拆分为Data分别为128B和72B的两个chunk发送，如果此时先发送一个设置chunkSize为256B的消息，再发送Data为200B的chunk，本地不再划分Message，B接受到Set Chunk Size的协议控制消息时会调整的接受的chunk的Data的大小，也不用再将两个chunk组成为一个Message。<br>以下为代表Set Chunk Size消息的chunk的Data：![Atla Text](https://github.com/jackytianhappy/ImgSource/blob/master/set-chunksize.png?raw=true)其中第一位必须为0，chunk Size占31个位，最大可代表2147483647＝0x7FFFFFFF＝231-1，但实际上所有大于16777215=0xFFFFFF的值都用不上，因为chunk size不能大于Message的长度，表示Message的长度字段是用3个字节表示的，最大只能为0xFFFFFF。<br>
+- <font color= 'red'><B>Set Chunk Size(Message Type ID=2):</B></font>当一个Message被切分为多个chunk，接受端只接收到了部分chunk时，发送该控制消息表示发送端不再传输同Message的chunk，接受端接收到这个消息后要丢弃这些不完整的chunk。Data数据中只需要一个CSID，表示丢弃该CSID的所有已接收到的chunk。![Alta Text](https://raw.githubusercontent.com/jackytianhappy/ImgSource/9abe6a176bc879cf1d1c6103d0cffa6b65642d33/abort%EF%BC%8Dmessage.png)
+- <font color= 'red'><B>Set Chunk Size(Message Type ID=3):</B></font>当收到对端的消息大小等于窗口大小（Window Size）时接受端要回馈一个ACK给发送端告知对方可以继续发送数据。窗口大小就是指收到接受端返回的ACK前最多可以发送的字节数量，返回的ACK中会带有从发送上一个ACK后接收到的字节数。![Alta Text](https://raw.githubusercontent.com/jackytianhappy/ImgSource/ad24e24e795a3d6299e3d082846a043dd50cd150/ACK-message.png)
+- <font color= 'red'><B>Set Chunk Size(Message Type ID=5):</B></font>发送端在接收到接受端返回的两个ACK间最多可以发送的字节数。![Alta Text](https://raw.githubusercontent.com/jackytianhappy/ImgSource/28d71a4d34b313d0c318640aa512ce8b0615fb25/ACK-windowsize.png)1.Hard(Limit Type＝0):接受端应该将Window Ack Size设置为消息中的值<br>2.Soft(Limit Type=1):接受端可以讲Window Ack Size设为消息中的值，也可以保存原来的值（前提是原来的Size小与该控制消息中的Window Ack Size）<br>3.Dynamic(Limit Type=2):如果上次的Set Peer Bandwidth消息中的Limit Type为0，本次也按Hard处理，否则忽略本消息，不去设置Window Ack Size。
 
+### 4 不同类型的RTMP Message
+- Command Message(命令消息，Message Type ID＝17或20)：表示在客户端盒服务器间传递的在对端执行某些操作的命令消息，如connect表示连接对端，对端如果同意连接的话会记录发送端信息并返回连接成功消息，publish表示开始向对方推流，接受端接到命令后准备好接受对端发送的流信息，后面会对比较常见的Command Message具体介绍。当信息使用AMF0编码时，Message Type ID＝20，AMF3编码时Message Type ID＝17.
+- Data Message（数据消息，Message Type ID＝15或18）：传递一些元数据（MetaData，比如视频名，分辨率等等）或者用户自定义的一些消息。当信息使用AMF0编码时，Message Type ID＝18，AMF3编码时Message Type ID＝15.
+- Shared Object Message(共享消息，Message Type ID＝16或19)：表示一个Flash类型的对象，由键值对的集合组成，用于多客户端，多实例时使用。当信息使用AMF0编码时，Message Type ID＝19，AMF3编码时Message Type ID＝16.
+- Audio Message（音频信息，Message Type ID＝8）：音频数据。
+- Video Message（视频信息，Message Type ID＝9）：视频数据。
+- Aggregate Message (聚集信息，Message Type ID＝22)：多个RTMP子消息的集合
+- User Control Message Events(用户控制消息，Message Type ID=4):告知对方执行该信息中包含的用户控制事件，比如Stream Begin事件告知对方流信息开始传输。和前面提到的协议控制信息（Protocol Control Message）不同，这是在RTMP协议层的，而不是在RTMP chunk流协议层的，这个很容易弄混。该信息在chunk流中发送时，Message Stream ID=0,Chunk Stream Id=2,Message Type Id=4。<br>———下面对以上7种信息具体介绍———-　<br>
+#### 4.1 Command Message(命令消息，Message Type ID＝17或20)
+发送端发送时会带有命令的名字，如connect，TransactionID表示此次命令的标识，Command Object表示相关参数。接受端收到命令后，会返回以下三种消息中的一种：_result 消息表示接受该命令，对端可以继续往下执行流程，_error消息代表拒绝该命令要执行的操作，method name消息代表要在之前命令的发送端执行的函数名称。这三种回应的消息都要带有收到的命令消息中的TransactionId来表示本次的回应作用于哪个命令。<br>
+可以认为发送命令消息的对象有两种，一种是NetConnection，表示双端的上层连接，一种是NetStream，表示流信息的传输通道，控制流信息的状态，如Play播放流，Pause暂停。
 
+#### 4.1.1 NetConnection Commands(连接层的命令)
+用来管理双端之间的连接状态，同时也提供了异步远程方法调用（RPC）在对端执行某方法，以下是常见的连接层的命令：
+##### 4.1.1.1 connect:用于客户端向服务器发送连接请求，消息的结构如下：
+|字段|类型|说明|
+|----|----|----|
+|Command Name(命令名字)| String | 命令的名字，如”connect”|
+|Transaction ID(事务ID)	| Number |恒为1|
+|Command Object(命令包含的参数对象)	| Object |键值对集合表示的命令参数|
+|Optional User Arguments（额外的用户参数)	| Object |用户自定义的额外信息|
+第三个字段中的Command Object中会涉及到很多键值对，这里不再一一列出，使用时可以参考协议的官方文档。
+消息的回应有两种，_result表示接受连接，_error表示连接失败
 
+##### 4.1.1.2 Call:用于在对端执行某函数，即常说的RPC：远程进程调用，消息的结构如下：
 
+|字段|	类型|	说明|
+|---|----|-----|
+|Procedure Name(进程名)|	String	|要调用的进程名称|
+|TransactionID | Number|上面接收到命令消息汇总的Transaction ID|
+|Command Object	|Object	|命令参数|
+|Optional Arguents|	Object|	用户自定|义参数|
+如果消息中的TransactionID不为0的话，对端需要对该命令做出响应，响应的消息结构如下：
 
+|字段	|类型|	说明|
+|----|----|----|
+|Command Name(命令名)	|String	|命令的名称|
+|TransactionID|	Number|	上面接收到的命令消息中的TransactionID|
+|Command Object|	Object|	命令参数|
+|Optional Arguments	|Object|	用户自定义参数|
+###### 4.1.1.3 Create Stream：创建传递具体信息的通道，从而可以在这个流中传递具体信息，传输信息单元为Chunk。
 
+|字段	|类型	|说明|
+|----|----|-----|
+|Command Name(命令名)|String	|“createStream”|
+|TransactionID|	Number|	上面接收到的命令消息中的TransactionID|
+|Command Object|	Object|	命令参数|
+|Optional Arguments|	Object|用户自定义参数|
+#### 4.1.2 NetStream Commands(流连接上的命令)
+Netstream建立在NetConnection之上，通过NetConnection的createStream命令创建，用于传输具体的音频、视频等信息。在传输层协议之上只能连接一个NetConnection，但一个NetConnection可以建立多个NetStream来建立不同的流通道传输数据。<br>
+以下会列出一些常用的NetStream Commands，服务端收到命令后会通过onStatus的命令来响应客户端，表示当前NetStream的状态。<br>
+onStatus命令的消息结构如下：
 
+|字段	|类型	|说明|
+|----|----|-----|
+|Command Name	|String|	“onStatus”|
+|TransactionID	Number|	恒为0|
+|Command Object|	NULL	|对onSatus命令来说不需要这个字段|
+|Info Object|	Object	|AMF类型的Object，至少包含以下三个属性：1，“level”，String类型，可以为“warning”、”status”、”error”中的一种；2，”code”,String类型，代表具体状态的关键字,比如”NetStream.Play.Start”表示开始播流；3，”description”，String类型，代表对当前状态的描述，提供对当前状态可读性更好的解释，除了这三种必要信息，用户还可以自己增加自定义的键值对
 
+##### 4.1.2.1 play(播放):
+由客户端向服务器发起请求从服务器端接受数据（如果传输的信息是视频的话就是请求开始播流），可以多次调用，这样本地就会形成一组数据流的接收者。注意其中有一个reset字段，表示是覆盖之前的播流（设为true）还是重新开始一路播放（设为false）。<br>
+play命令的结构如下：
 
+|字段	|类型	|说明|
+|----|----|-----|
+|命令名	| String |“play”|
+|事务ID	| Number |恒为0|
+|命令参数对象	|Null	|不需要此字段，设为空|
+|流名称	| String |要播放的流的名称|
+|开始位置	| Number |可选参数，表示从何时开始播流，以秒为单位。默认为－2，代表选取对应该流名称的直播流，即当前正在推送的流开始播放，如果对应该名称的直播流不存在，就选取该名称的流的录播版本，如果这也没有，当前播流端要等待直到对端开始该名称的流的直播。如果传值－1，那么只会选取直播流进行播放，即使有录播流也不会播放；如果传值或者正数，就代表从该流的该时间点开始播放，如果流不存在的话就会自动播放播放列表中的下一个流|
+|周期	| Number |可选参数，表示回退的最小间隔单位，以秒为单位计数。默认值为－1，代表直到直播流不再可用或者录播流停止后才能回退播放；如果传值为0，代表从当前帧开始播放|
+|重置	|Boolean	|可选参数，true代表清除之前的流，重新开始一路播放，false代表保留原来的流，向本地的播放列表中再添加一条播放流|
 
+##### 4.1.2.2 play2（播放）：
+和上面的play命令不同的是，play2命令可以将当前正在播放的流切换到同样数据但不同比特率的流上，服务器端会维护多种比特率的文件来供客户端使用play2命令来切换。
 
+|字段	|类型	|说明|
+|---|---|---|
+|Command Name|	String|	“play2”|
+|TransactionID|	Number	|恒为0|
+|Command Object|	NULL,对onSatus命令来说不需要这个字段||
+|parameters	|Object	|AMF编码的Flash对象，包括了一些用于描述flash.net.NetstreamPlayOptions ActionScript obejct的参数|
 
+###### 4.1.2.3 deleteStream(删除流)：
+用于客户端告知服务器端本地的某个流对象已被删除，不需要再传输此路流。
+
+|字段|	类型|	说明|
+|---|---|---|
+|Command Name	|String	|“deleteStream”|
+|TransactionID|	Number	|恒为0|
+|Command Object|	NULL,对onSatus命令来说不需要这个字段||
+|Stream ID（流ID)|	Number|	本地已删除，不再需要服务器传输的流的ID|
+
+##### 4.1.2.4 receiveAudio(接收音频)
+通知服务器端该客户端是否要发送音频
+receiveAudio命令结构如下：
+
+|字段|	类型	|说明|
+|---|---|---|
+|Command Name|String|	“receiveAudio”|
+|TransactionID	|Number|	恒为0|
+|Command Object|	NULL	|对onSatus命令来说不需要这个字段|
+|Bool Flag	|Boolean	|true表示发送音频，如果该值为false，服务器端不做响应，如果为true的话，服务器端就会准备接受音频数据，会向客户端回复NetStream.Seek.Notify和NetStream.Play.Start的Onstatus命令告知客户端当前流的状态|
+
+###### 4.1.2.5 receiveVideo(接收视频)：
+通知服务器端该客户端是否要发送视频
+receiveVideo命令结构如下：
+
+|字段	|类型	|说明|
+|---|---|---|
+|Command Name	|String|	“receiveVideo”|
+|TransactionID	|Number|	恒为0|
+|Command Object	|NULL	|对onSatus命令来说不需要这个字段|
+|Bool Flag|	Boolean|	true表示发送视频，如果该值为false，服务器端不做响应，如果为true的话，服务器端就会准备接受视频数据，会向客户端回复NetStream.Seek.Notify和NetStream.Play.Start的Onstatus命令告知客户端当前流的状态|
+
+##### 4.1.2.6 publish(推送数据)：
+由客户端向服务器发起请求推流到服务器。
+publish命令结构如下：
+
+|字段	|类型|	说明|
+|---|---|---|
+|Command Name|	String|	“publish”|
+|TransactionID|	Number|	恒为0|
+|Command Object	|NULL,对onSatus命令来说不需要这个字段||
+|Publishing Name（推流的名称）|	String	流名称｜|
+|Publishing Type（推流类型）	|String	|“live”、”record”、”append”中的一种。live表示该推流文件不会在服务器端存储；record表示该推流的文件会在服务器应用程序下的子目录下保存以便后续播放，如果文件已经存在的话删除原来所有的内容重新写入；append也会将推流数据保存在服务器端，如果文件不存在的话就会建立一个新文件写入，如果对应该流的文件已经存在的话保存原来的数据，在文件末尾接着写入|
+
+##### 4.1.2.7 seek(定位流的位置)：
+定位到视频或音频的某个位置，以毫秒为单位。
+seek命令的结构如下：
+
+|字段	|类型	|说明|
+|---|---|---|
+|Command Name|	String	|“seek”|
+|TransactionID|	Number	|恒为0|
+|Command Object|	NULL,对onSatus命令来说不需要这个字段||
+|milliSeconds	|Number|	定位到该文件的xx毫秒处｜|
+
+##### 4.1.2.8 pause（暂停）：
+客户端告知服务端停止或恢复播放。
+pause命令的结构如下：
+
+|字段|	类型|	说明|
+|---|---|---|
+|Command Name	|String|“pause”|
+|TransactionID	|Number|	恒为0|
+|Command Object	|NULL,对onSatus命令来说不需要这个字段||
+|Pause/Unpause Flag|	Boolean|	true表示暂停，false表示恢复|
+|milliSeconds|	Number	|暂停或者恢复的时间，以毫秒为单位｜
+如果Pause为true即表示客户端请求暂停的话，服务端暂停对应的流会返回NetStream.Pause.Notify的onStatus命令来告知客户端当前流处于暂停的状态，当Pause为false时，服务端会返回NetStream.Unpause.Notify的命令来告知客户端当前流恢复。如果服务端对该命令响应失败，返回_error信息。
+
+### 5.代表流程
+#### 5.1推流流程
+![Alta Text](https://github.com/jackytianhappy/ImgSource/blob/master/publish-flow.png?raw=true)
+#### 5.2 播放流程
+![Alta Text](https://github.com/jackytianhappy/ImgSource/blob/master/play-flow.png?raw=true)
 
